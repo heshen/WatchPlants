@@ -64,7 +64,6 @@ class Camera2Activity : AppCompatActivity() {
 			mCameraControl?.takePicture {
 				Logger.d("takePicture done! $it")
 				val image = it?.acquireNextImage()
-				image.
 			}
 		}
 
