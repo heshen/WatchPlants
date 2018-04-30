@@ -2,6 +2,7 @@ package shsato.tk.watchplant.ui.fragment
 
 
 import android.Manifest
+import android.app.Activity
 import android.content.pm.PackageManager
 import android.graphics.SurfaceTexture
 import android.media.ImageReader
@@ -9,6 +10,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.Looper
+import android.support.v4.app.ActivityCompat
 import android.support.v4.app.Fragment
 import android.support.v4.content.ContextCompat
 import android.view.LayoutInflater
@@ -16,6 +18,7 @@ import android.view.TextureView
 import android.view.View
 import android.view.ViewGroup
 import kotlinx.android.synthetic.main.fragment_camera2.*
+import shsato.tk.watchplant.Constants
 import shsato.tk.watchplant.Logger
 import shsato.tk.watchplant.R
 import shsato.tk.watchplant.camera.Camera2
@@ -25,7 +28,7 @@ import shsato.tk.watchplant.interfaces.CameraControl
  * Camera
  *
  */
-class Camera2Fragment : Fragment(), CameraControl {
+class Camera2Fragment : Fragment(), CameraControl, ActivityCompat.OnRequestPermissionsResultCallback {
 
 	companion object {
 		@JvmStatic
@@ -52,13 +55,8 @@ class Camera2Fragment : Fragment(), CameraControl {
 	private var backgroundThread: HandlerThread? = null
 	private var backgroundHandler: Handler? = null
 
-	override fun start() {
-	}
-
-	override fun release() {
-	}
-
-	override fun takePicture(callback: (imageReader: ImageReader) -> Unit) {
+	override fun takePicture(backgroundCallback: (imageReader: ImageReader?) -> Unit) {
+		mCamera?.takePicture(backgroundCallback)
 	}
 
 	override fun onCreate(savedInstanceState: Bundle?) {
@@ -96,6 +94,18 @@ class Camera2Fragment : Fragment(), CameraControl {
 		super.onPause()
 	}
 
+	override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+		when (requestCode) {
+			Constants.REQUEST_CAMERA -> {
+				if (grantResults.size != 1 || grantResults[0] != PackageManager.PERMISSION_GRANTED) {
+					activity?.setResult(Activity.RESULT_CANCELED)
+					activity?.finish()
+				}
+			}
+		}
+	}
+
+
 	private fun closeCamera() {
 		mCamera?.release()
 	}
@@ -103,6 +113,7 @@ class Camera2Fragment : Fragment(), CameraControl {
 	private fun openCamera(width: Int, height: Int) {
 		val permission = ContextCompat.checkSelfPermission(activity!!, Manifest.permission.CAMERA)
 		if (permission != PackageManager.PERMISSION_GRANTED) {
+			requestPermissions(arrayOf(android.Manifest.permission.CAMERA), Constants.REQUEST_CAMERA)
 			return
 		}
 		mCamera?.setTexture(preview.surfaceTexture)

@@ -8,7 +8,6 @@ import android.media.ImageReader
 import android.os.Handler
 import android.util.Size
 import android.view.Surface
-import android.view.SurfaceHolder
 import android.view.WindowManager
 import shsato.tk.watchplant.Logger
 import shsato.tk.watchplant.util.CameraUtil
@@ -16,7 +15,7 @@ import java.util.concurrent.Semaphore
 import java.util.concurrent.TimeUnit
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
-
+import android.util.SparseIntArray
 
 
 class Camera2(private val context: Context, private val uiHandler: Handler) {
@@ -30,18 +29,23 @@ class Camera2(private val context: Context, private val uiHandler: Handler) {
 		private const val LOCK_FOCUS_DELAY_ON_FOCUSED   = 5000L
 		private const val LOCK_FOCUS_DELAY_ON_UNFOCUSED = 1000L
 
+		private val ORIENTATIONS = SparseIntArray()
+		init {
+			ORIENTATIONS.append(Surface.ROTATION_0, 90)
+			ORIENTATIONS.append(Surface.ROTATION_90, 0)
+			ORIENTATIONS.append(Surface.ROTATION_180, 270)
+			ORIENTATIONS.append(Surface.ROTATION_270, 180)
+		}
 
 	}
 
 	private val mCameraManager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
 	private var mCameraId: String? = null
 	private var mImageReader: ImageReader? = null
-	private var mSurfaceHolder: SurfaceHolder? = null
 	private var mTexture: SurfaceTexture? = null
-	private var mIsPortrait: Boolean = false
 	private var mOnCaptureResult: ((result: CaptureResult, isCompleted: Boolean) -> Unit)? = null
 
-	private var mCanTakePicture: Boolean = false
+	private var mFlashSupported = false
 
 	private var mCameraDevice: CameraDevice? = null
 	private var mPreviewRequestBuilder: CaptureRequest.Builder? = null
@@ -141,6 +145,8 @@ class Camera2(private val context: Context, private val uiHandler: Handler) {
 					maxPreviewWidth, maxPreviewHeight,
 					largest)
 
+			mFlashSupported = characteristics.get(CameraCharacteristics.FLASH_INFO_AVAILABLE) == true
+
 		} catch (e: CameraAccessException) {
 			Logger.e(e.toString())
 		} catch (e: NullPointerException) {
@@ -211,6 +217,15 @@ class Camera2(private val context: Context, private val uiHandler: Handler) {
 		}
 	}
 
+	fun takePicture(backgroundCallback: (imageReader: ImageReader?) -> Unit) {
+		mImageReader?.setOnImageAvailableListener({
+			mBackgroundHandler?.post({
+				backgroundCallback.invoke(it)
+			})
+		}, mBackgroundHandler)
+		lockFocus()
+	}
+
 	private fun createSession(handler: Handler?) {
 		mTexture?.setDefaultBufferSize(mPreviewSize!!.width, mPreviewSize!!.height)
 		val surface = Surface(mTexture)
@@ -245,9 +260,6 @@ class Camera2(private val context: Context, private val uiHandler: Handler) {
 					CaptureResult.CONTROL_AF_STATE_PASSIVE_FOCUSED -> uiHandler.removeCallbacks(mLockAutoFocusRunnable)
 				}
 				mLastAfState = afState
-				if (isCompleted) {
-					mCanTakePicture = true
-				}
 
 			}
 			mCaptureSession?.setRepeatingRequest(mPreviewRequestBuilder?.build(), mCaptureCallback, handler)
@@ -337,4 +349,125 @@ class Camera2(private val context: Context, private val uiHandler: Handler) {
 
 		return res
 	}
+
+	private fun lockFocus() {
+		try {
+			mPreviewRequestBuilder?.set(CaptureRequest.CONTROL_AF_TRIGGER, CameraMetadata.CONTROL_AF_TRIGGER_START)
+			mOnCaptureResult = { result, isCompleted ->
+				capturePicture(result)
+			}
+			mCaptureSession?.capture(mPreviewRequestBuilder?.build(), mCaptureCallback, mBackgroundHandler)
+		} catch (e: CameraAccessException) {
+			Logger.e(e.toString())
+		}
+	}
+
+	private fun unlockFocus() {
+		try {
+			// Reset the auto-focus trigger
+			mPreviewRequestBuilder?.set(CaptureRequest.CONTROL_AF_TRIGGER,
+					CameraMetadata.CONTROL_AF_TRIGGER_CANCEL)
+			setAutoFlash(mPreviewRequestBuilder)
+			mOnCaptureResult = null
+			mCaptureSession?.capture(mPreviewRequestBuilder?.build(), mCaptureCallback,
+					mBackgroundHandler)
+			createPreview(mBackgroundHandler)
+		} catch (e: CameraAccessException) {
+			Logger.e(e.toString())
+		}
+
+	}
+
+	private fun runPrecaptureSequence() {
+		try {
+			// This is how to tell the camera to trigger.
+			mPreviewRequestBuilder?.set(CaptureRequest.CONTROL_AE_PRECAPTURE_TRIGGER,
+					CaptureRequest.CONTROL_AE_PRECAPTURE_TRIGGER_START)
+			// Tell #captureCallback to wait for the precapture sequence to be set.
+			mOnCaptureResult = {
+				result, isCompleted ->
+				val aeState = result.get(CaptureResult.CONTROL_AE_STATE)
+				if (aeState == null ||
+						aeState == CaptureResult.CONTROL_AE_STATE_PRECAPTURE ||
+						aeState == CaptureRequest.CONTROL_AE_STATE_FLASH_REQUIRED) {
+					mOnCaptureResult = {
+						_, _ ->
+						val aeState2 = result.get(CaptureResult.CONTROL_AE_STATE)
+						if (aeState2 == null || aeState2 != CaptureResult.CONTROL_AE_STATE_PRECAPTURE) {
+							captureStillPicture()
+						}
+					}
+				}
+			}
+			mCaptureSession?.capture(mPreviewRequestBuilder?.build(), mCaptureCallback, mBackgroundHandler)
+		} catch (e: CameraAccessException) {
+			Logger.e(e.toString())
+		}
+
+	}
+
+	private fun capturePicture(result: CaptureResult) {
+		val afState = result.get(CaptureResult.CONTROL_AF_STATE)
+		if (afState == null) {
+			captureStillPicture()
+		} else if (afState == CaptureResult.CONTROL_AF_STATE_FOCUSED_LOCKED
+				|| afState == CaptureResult.CONTROL_AF_STATE_NOT_FOCUSED_LOCKED) {
+			// CONTROL_AE_STATE can be null on some devices
+			val aeState = result.get(CaptureResult.CONTROL_AE_STATE)
+			if (aeState == null || aeState == CaptureResult.CONTROL_AE_STATE_CONVERGED) {
+				captureStillPicture()
+			} else {
+				runPrecaptureSequence()
+			}
+		}
+	}
+
+	private fun setAutoFlash(requestBuilder: CaptureRequest.Builder?) {
+		if (mFlashSupported) {
+			requestBuilder?.set(CaptureRequest.CONTROL_AE_MODE,
+					CaptureRequest.CONTROL_AE_MODE_ON_AUTO_FLASH)
+		}
+	}
+
+	private fun captureStillPicture() {
+		try {
+			if (mCameraDevice == null) return
+			val rotation = (context.getSystemService(Context.WINDOW_SERVICE) as WindowManager).defaultDisplay.rotation
+
+			// This is the CaptureRequest.Builder that we use to take a picture.
+			val captureBuilder = mCameraDevice?.createCaptureRequest(
+					CameraDevice.TEMPLATE_STILL_CAPTURE)?.apply {
+				addTarget(mImageReader?.surface)
+
+				// Sensor orientation is 90 for most devices, or 270 for some devices (eg. Nexus 5X)
+				// We have to take that into account and rotate JPEG properly.
+				// For devices with orientation of 90, we return our mapping from ORIENTATIONS.
+				// For devices with orientation of 270, we need to rotate the JPEG 180 degrees.
+				set(CaptureRequest.JPEG_ORIENTATION,
+						(ORIENTATIONS.get(rotation) + mSensorOrientation + 270) % 360)
+
+				// Use the same AE and AF modes as the preview.
+				set(CaptureRequest.CONTROL_AF_MODE,
+						CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
+			}?.also { setAutoFlash(it) }
+
+			val captureCallback = object : CameraCaptureSession.CaptureCallback() {
+
+				override fun onCaptureCompleted(session: CameraCaptureSession,
+				                                request: CaptureRequest,
+				                                result: TotalCaptureResult) {
+					unlockFocus()
+				}
+			}
+
+			mCaptureSession?.apply {
+				stopRepeating()
+				abortCaptures()
+				capture(captureBuilder?.build(), captureCallback, null)
+			}
+		} catch (e: CameraAccessException) {
+			Logger.e(e.toString())
+		}
+	}
+
 }

@@ -9,6 +9,7 @@ import android.support.v4.content.ContextCompat
 import android.view.MenuItem
 import kotlinx.android.synthetic.main.activity_camera2.*
 import shsato.tk.watchplant.Constants
+import shsato.tk.watchplant.Logger
 import shsato.tk.watchplant.R
 import shsato.tk.watchplant.interfaces.CameraControl
 import shsato.tk.watchplant.ui.fragment.Camera2Fragment
@@ -23,14 +24,6 @@ class Camera2Activity : AppCompatActivity() {
 		init(savedInstanceState)
 	}
 
-	override fun onResume() {
-		super.onResume()
-		if (ContextCompat.checkSelfPermission(this, android.Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
-			ActivityCompat.requestPermissions(this, arrayOf(android.Manifest.permission.CAMERA), Constants.REQUEST_CAMERA)
-		} else {
-			startCamera()
-		}
-	}
 
 	override fun onOptionsItemSelected(item: MenuItem?): Boolean {
 		item?.let {
@@ -45,22 +38,6 @@ class Camera2Activity : AppCompatActivity() {
 
 	override fun onBackPressed() {
 		back()
-	}
-
-	override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
-		when (requestCode) {
-			Constants.REQUEST_CAMERA -> {
-				if (grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
-					startCamera()
-				} else {
-					back()
-				}
-			}
-		}
-	}
-
-	private fun startCamera() {
-		mCameraControl?.start()
 	}
 
 	private fun init(savedInstanceState: Bundle?) {
@@ -82,10 +59,18 @@ class Camera2Activity : AppCompatActivity() {
 			it.setDisplayHomeAsUpEnabled(true)
 			it.title = ""
 		}
+
+		take_picture.setOnClickListener {
+			mCameraControl?.takePicture {
+				Logger.d("takePicture done! $it")
+				val image = it?.acquireNextImage()
+				image.
+			}
+		}
+
 	}
 
 	private fun back() {
-		mCameraControl?.release()
 		setResult(Activity.RESULT_CANCELED)
 		finish()
 	}
