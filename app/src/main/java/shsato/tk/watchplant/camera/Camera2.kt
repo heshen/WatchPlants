@@ -7,18 +7,20 @@ import android.hardware.camera2.*
 import android.media.ImageReader
 import android.os.Handler
 import android.util.Size
+import android.util.SparseIntArray
 import android.view.Surface
 import android.view.WindowManager
 import shsato.tk.watchplant.Logger
 import shsato.tk.watchplant.util.CameraUtil
 import java.util.concurrent.Semaphore
 import java.util.concurrent.TimeUnit
-import android.hardware.camera2.CameraCharacteristics
-import android.hardware.camera2.CameraManager
-import android.util.SparseIntArray
 
 
 class Camera2(private val context: Context, private val uiHandler: Handler) {
+
+	enum class State {
+		PREVIEW, WAITING_LOCK, WAITING_PRE_CAPTURE, WAITING_NON_PRE_CAPTURE, PICTURE_TAKEN, NONE
+	}
 
 	companion object {
 		private const val CAMERA_FACING = CameraCharacteristics.LENS_FACING_BACK
@@ -43,7 +45,6 @@ class Camera2(private val context: Context, private val uiHandler: Handler) {
 	private var mCameraId: String? = null
 	private var mImageReader: ImageReader? = null
 	private var mTexture: SurfaceTexture? = null
-	private var mOnCaptureResult: ((result: CaptureResult, isCompleted: Boolean) -> Unit)? = null
 
 	private var mFlashSupported = false
 
@@ -56,6 +57,8 @@ class Camera2(private val context: Context, private val uiHandler: Handler) {
 	private var mSensorOrientation = 0
 	private var mPreviewSize: Size? = null
 	private var mLastAfState: Int? = null
+
+	private var mState = State.NONE
 
 	private val mLockAutoFocusRunnable = Runnable {
 		lockAutoFocus()
@@ -103,7 +106,48 @@ class Camera2(private val context: Context, private val uiHandler: Handler) {
 		}
 
 		private fun callOnCaptureResult(result: CaptureResult, isCompleted: Boolean) {
-			mOnCaptureResult?.invoke(result, isCompleted)
+			when (mState) {
+				State.PREVIEW -> {
+					val afState = result[CaptureResult.CONTROL_AF_STATE]
+					Logger.d("$afState")
+					if (afState == null || afState == mLastAfState) {
+						return
+					}
+					when (afState) {
+						CaptureResult.CONTROL_AF_STATE_INACTIVE -> lockAutoFocus()
+						CaptureResult.CONTROL_AF_STATE_FOCUSED_LOCKED -> {
+							uiHandler.removeCallbacks(mLockAutoFocusRunnable)
+							uiHandler.postDelayed(mLockAutoFocusRunnable, LOCK_FOCUS_DELAY_ON_FOCUSED)
+						}
+						CaptureResult.CONTROL_AF_STATE_NOT_FOCUSED_LOCKED -> {
+							uiHandler.removeCallbacks(mLockAutoFocusRunnable)
+							uiHandler.postDelayed(mLockAutoFocusRunnable, LOCK_FOCUS_DELAY_ON_UNFOCUSED)
+						}
+						CaptureResult.CONTROL_AF_STATE_PASSIVE_UNFOCUSED -> uiHandler.removeCallbacks(mLockAutoFocusRunnable)
+						CaptureResult.CONTROL_AF_STATE_PASSIVE_FOCUSED -> uiHandler.removeCallbacks(mLockAutoFocusRunnable)
+					}
+					mLastAfState = afState
+				}
+				State.WAITING_LOCK -> {
+					capturePicture(result)
+				}
+				State.WAITING_PRE_CAPTURE -> {
+					val aeState = result.get(CaptureResult.CONTROL_AE_STATE)
+					if (aeState == null ||
+							aeState == CaptureResult.CONTROL_AE_STATE_PRECAPTURE ||
+							aeState == CaptureRequest.CONTROL_AE_STATE_FLASH_REQUIRED) {
+						mState = State.WAITING_NON_PRE_CAPTURE
+					}
+				}
+				State.WAITING_NON_PRE_CAPTURE -> {
+					val aeState = result.get(CaptureResult.CONTROL_AE_STATE)
+					if (aeState == null || aeState != CaptureResult.CONTROL_AE_STATE_PRECAPTURE) {
+						mState = State.PICTURE_TAKEN
+						captureStillPicture()
+					}
+				}
+				else -> { /* do nothing */ }
+			}
 		}
 
 	}
@@ -242,26 +286,7 @@ class Camera2(private val context: Context, private val uiHandler: Handler) {
 			} else {
 				mPreviewRequestBuilder?.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
 			}
-			mPreviewRequestBuilder?.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON_AUTO_FLASH)
-			mOnCaptureResult = { result, isCompleted ->
-				// この辺はコピペ産
-				val afState = result[CaptureResult.CONTROL_AF_STATE]
-				when (afState) {
-					CaptureResult.CONTROL_AF_STATE_INACTIVE -> lockAutoFocus()
-					CaptureResult.CONTROL_AF_STATE_FOCUSED_LOCKED -> {
-						uiHandler.removeCallbacks(mLockAutoFocusRunnable)
-						uiHandler.postDelayed(mLockAutoFocusRunnable, LOCK_FOCUS_DELAY_ON_FOCUSED)
-					}
-					CaptureResult.CONTROL_AF_STATE_NOT_FOCUSED_LOCKED -> {
-						uiHandler.removeCallbacks(mLockAutoFocusRunnable)
-						uiHandler.postDelayed(mLockAutoFocusRunnable, LOCK_FOCUS_DELAY_ON_UNFOCUSED)
-					}
-					CaptureResult.CONTROL_AF_STATE_PASSIVE_UNFOCUSED -> uiHandler.removeCallbacks(mLockAutoFocusRunnable)
-					CaptureResult.CONTROL_AF_STATE_PASSIVE_FOCUSED -> uiHandler.removeCallbacks(mLockAutoFocusRunnable)
-				}
-				mLastAfState = afState
-
-			}
+			mState = State.PREVIEW
 			mCaptureSession?.setRepeatingRequest(mPreviewRequestBuilder?.build(), mCaptureCallback, handler)
 		} catch (e: CameraAccessException) {
 			Logger.e(e.toString())
@@ -353,9 +378,7 @@ class Camera2(private val context: Context, private val uiHandler: Handler) {
 	private fun lockFocus() {
 		try {
 			mPreviewRequestBuilder?.set(CaptureRequest.CONTROL_AF_TRIGGER, CameraMetadata.CONTROL_AF_TRIGGER_START)
-			mOnCaptureResult = { result, isCompleted ->
-				capturePicture(result)
-			}
+			mState = State.WAITING_LOCK
 			mCaptureSession?.capture(mPreviewRequestBuilder?.build(), mCaptureCallback, mBackgroundHandler)
 		} catch (e: CameraAccessException) {
 			Logger.e(e.toString())
@@ -368,7 +391,7 @@ class Camera2(private val context: Context, private val uiHandler: Handler) {
 			mPreviewRequestBuilder?.set(CaptureRequest.CONTROL_AF_TRIGGER,
 					CameraMetadata.CONTROL_AF_TRIGGER_CANCEL)
 			setAutoFlash(mPreviewRequestBuilder)
-			mOnCaptureResult = null
+			mState = State.PREVIEW
 			mCaptureSession?.capture(mPreviewRequestBuilder?.build(), mCaptureCallback,
 					mBackgroundHandler)
 			createPreview(mBackgroundHandler)
@@ -384,21 +407,7 @@ class Camera2(private val context: Context, private val uiHandler: Handler) {
 			mPreviewRequestBuilder?.set(CaptureRequest.CONTROL_AE_PRECAPTURE_TRIGGER,
 					CaptureRequest.CONTROL_AE_PRECAPTURE_TRIGGER_START)
 			// Tell #captureCallback to wait for the precapture sequence to be set.
-			mOnCaptureResult = {
-				result, isCompleted ->
-				val aeState = result.get(CaptureResult.CONTROL_AE_STATE)
-				if (aeState == null ||
-						aeState == CaptureResult.CONTROL_AE_STATE_PRECAPTURE ||
-						aeState == CaptureRequest.CONTROL_AE_STATE_FLASH_REQUIRED) {
-					mOnCaptureResult = {
-						_, _ ->
-						val aeState2 = result.get(CaptureResult.CONTROL_AE_STATE)
-						if (aeState2 == null || aeState2 != CaptureResult.CONTROL_AE_STATE_PRECAPTURE) {
-							captureStillPicture()
-						}
-					}
-				}
-			}
+			mState = State.WAITING_PRE_CAPTURE
 			mCaptureSession?.capture(mPreviewRequestBuilder?.build(), mCaptureCallback, mBackgroundHandler)
 		} catch (e: CameraAccessException) {
 			Logger.e(e.toString())
@@ -407,19 +416,26 @@ class Camera2(private val context: Context, private val uiHandler: Handler) {
 	}
 
 	private fun capturePicture(result: CaptureResult) {
-		val afState = result.get(CaptureResult.CONTROL_AF_STATE)
-		if (afState == null) {
+		val aeState = result.get(CaptureResult.CONTROL_AE_STATE)
+		if (aeState == null || aeState == CaptureResult.CONTROL_AE_STATE_CONVERGED) {
+            mState = State.PICTURE_TAKEN
 			captureStillPicture()
-		} else if (afState == CaptureResult.CONTROL_AF_STATE_FOCUSED_LOCKED
-				|| afState == CaptureResult.CONTROL_AF_STATE_NOT_FOCUSED_LOCKED) {
-			// CONTROL_AE_STATE can be null on some devices
-			val aeState = result.get(CaptureResult.CONTROL_AE_STATE)
-			if (aeState == null || aeState == CaptureResult.CONTROL_AE_STATE_CONVERGED) {
-				captureStillPicture()
-			} else {
-				runPrecaptureSequence()
-			}
+		} else {
+			runPrecaptureSequence()
 		}
+//		val afState = result.get(CaptureResult.CONTROL_AF_STATE)
+//		if (afState == null) {
+//			captureStillPicture()
+//		} else if (afState == CaptureResult.CONTROL_AF_STATE_FOCUSED_LOCKED
+//				|| afState == CaptureResult.CONTROL_AF_STATE_NOT_FOCUSED_LOCKED) {
+//			 CONTROL_AE_STATE can be null on some devices
+//			val aeState = result.get(CaptureResult.CONTROL_AE_STATE)
+//			if (aeState == null || aeState == CaptureResult.CONTROL_AE_STATE_CONVERGED) {
+//				captureStillPicture()
+//			} else {
+//				runPrecaptureSequence()
+//			}
+//		}
 	}
 
 	private fun setAutoFlash(requestBuilder: CaptureRequest.Builder?) {
@@ -456,14 +472,15 @@ class Camera2(private val context: Context, private val uiHandler: Handler) {
 				override fun onCaptureCompleted(session: CameraCaptureSession,
 				                                request: CaptureRequest,
 				                                result: TotalCaptureResult) {
+//					createPreview(mBackgroundHandler)
 					unlockFocus()
 				}
 			}
 
-			mCaptureSession?.apply {
-				stopRepeating()
-				abortCaptures()
-				capture(captureBuilder?.build(), captureCallback, null)
+			mCaptureSession?.also {
+				it.stopRepeating()
+				it.abortCaptures()
+				it.capture(captureBuilder?.build(), captureCallback, null)
 			}
 		} catch (e: CameraAccessException) {
 			Logger.e(e.toString())

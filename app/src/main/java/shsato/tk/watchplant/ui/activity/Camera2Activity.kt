@@ -1,14 +1,10 @@
 package shsato.tk.watchplant.ui.activity
 
 import android.app.Activity
-import android.content.pm.PackageManager
-import android.support.v7.app.AppCompatActivity
 import android.os.Bundle
-import android.support.v4.app.ActivityCompat
-import android.support.v4.content.ContextCompat
+import android.support.v7.app.AppCompatActivity
 import android.view.MenuItem
 import kotlinx.android.synthetic.main.activity_camera2.*
-import shsato.tk.watchplant.Constants
 import shsato.tk.watchplant.Logger
 import shsato.tk.watchplant.R
 import shsato.tk.watchplant.interfaces.CameraControl
@@ -64,6 +60,9 @@ class Camera2Activity : AppCompatActivity() {
 			mCameraControl?.takePicture {
 				Logger.d("takePicture done! $it")
 				val image = it?.acquireNextImage()
+				image?.use {
+
+				}
 			}
 		}
 
